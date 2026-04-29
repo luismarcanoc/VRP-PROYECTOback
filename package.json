@@ -1,0 +1,30 @@
+{
+  "name": "vrp-proyectoback",
+  "version": "1.0.0",
+  "description": "API para visualizar y optimizar rutas VRP desde Excel",
+  "main": "server.js",
+  "scripts": {
+    "build": "npm install",
+    "dev": "node server.js",
+    "start": "node server.js",
+    "import:excel": "node scripts/import-excel-to-neon.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/luismarcanoc/VRP-PROYECTOback.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/luismarcanoc/VRP-PROYECTOback/issues"
+  },
+  "homepage": "https://github.com/luismarcanoc/VRP-PROYECTOback#readme",
+  "dependencies": {
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "pg": "^8.20.0",
+    "xlsx": "^0.18.5"
+  }
+}
