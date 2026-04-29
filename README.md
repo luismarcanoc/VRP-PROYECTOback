@@ -14,6 +14,19 @@ Backend para Render, conectado a Neon.
 - `GOOGLE_MAPS_API_KEY`
 - `DISTRIBUTION_ORIGIN` (opcional)
 - `FRONTEND_ORIGIN` (URL del frontend para CORS)
+- `NEON_SOURCE_TABLE` (por defecto `DIRECCIONES Y RUTAS`)
+
+### Auto deploy por cambios en DB (opcional)
+
+Si quieres que el backend dispare un deploy automaticamente cuando detecta cambios en Neon:
+
+- `AUTO_DEPLOY_ON_DB_CHANGE=true`
+- `RENDER_DEPLOY_HOOK_URL=<tu deploy hook de render>`
+- `DB_WATCH_INTERVAL_MS=120000` (cada 2 min)
+- `AUTO_DEPLOY_COOLDOWN_MS=600000` (minimo 10 min entre deploys)
+- `DB_CHANGE_WATCH_QUERY` (opcional, query SQL que retorne columna `signature`)
+
+Nota: para evitar loops de redeploy, usa cooldown alto.
 
 ## Esquema en Neon
 
