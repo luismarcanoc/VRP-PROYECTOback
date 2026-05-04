@@ -59,6 +59,14 @@ function pickColumn(columns, candidates) {
     return null;
 }
 
+function pickColumnByContains(columns, fragments) {
+    const normalized = columns.map((col) => ({ original: col, normalized: normalizeHeader(col) }));
+    const found = normalized.find((item) =>
+        fragments.every((fragment) => item.normalized.includes(normalizeHeader(fragment)))
+    );
+    return found ? found.original : null;
+}
+
 function sqlExpr(columnName, fallback = "") {
     if (!columnName) return `'${fallback}'`;
     return `COALESCE(TRIM(${quoteIdent(columnName)}::text), '')`;
@@ -95,7 +103,13 @@ async function fetchSourceClients(routeFilter) {
     if (!columns.length) throw new Error(`No existe la tabla ${NEON_SOURCE_TABLE} en Neon.`);
 
     const idCol = pickColumn(columns, ["CLIENTES", "CIENTES", "CLIENTE ID", "ID CLIENTE"]);
-    const nameCol = pickColumn(columns, ["NOMBRE O RAZON SOCIAL", "NOMBRE"]);
+    const nameCol = pickColumn(columns, [
+        "NOMBRE O RAZON SOCIAL",
+        "NOMBRE_O_RAZON_SOCIAL",
+        "NOMBRE O RAZÓN SOCIAL",
+        "NOMBRE_O_RAZÓN_SOCIAL",
+        "NOMBRE"
+    ]) || pickColumnByContains(columns, ["nombre", "razon"]) || pickColumnByContains(columns, ["nombre"]);
     const addressCol = pickColumn(columns, ["DIRECCION", "DIRECCIÓN"]);
     const routeCol = pickColumn(columns, ["RUTA", "RUTA ASIGNADA"]);
     const transportCol = pickColumn(columns, ["TRANSPORTE"]);
@@ -124,6 +138,7 @@ async function fetchSourceClients(routeFilter) {
         rowNumber: row.row_number,
         clientId: row.client_id,
         name: row.name,
+        nombre_o_razon_social: row.name,
         address: row.address,
         route: row.route_name,
         transport: row.transport
@@ -138,19 +153,23 @@ async function getOverridesMap() {
 }
 
 async function getClients(route) {
-    const base = await fetchSourceClients(route);
+    const base = await fetchSourceClients("");
     const overrides = await getOverridesMap();
-    return base.map((client) => {
+    const merged = base.map((client) => {
         const override = overrides.get(client.key);
         if (!override) return client;
+        const name = normalizeText(override.name || client.name);
         return {
             ...client,
-            name: normalizeText(override.name || client.name),
+            name,
+            nombre_o_razon_social: name,
             address: normalizeText(override.address || client.address),
             route: normalizeText(override.route_name || client.route),
             transport: normalizeText(override.transport || client.transport)
         };
     });
+    if (!route) return merged;
+    return merged.filter((client) => normalizeText(client.route) === normalizeText(route));
 }
 
 function isClientWithErrors(client) {
