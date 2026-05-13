@@ -4,7 +4,8 @@ const { Pool } = require("pg");
 
 const app = express();
 const PORT = Number(process.env.PORT || 10000);
-const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || "";
+const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_SERVER_API_KEY || process.env.GOOGLE_MAPS_API_KEY || "";
+const GOOGLE_MAPS_BROWSER_API_KEY = process.env.GOOGLE_MAPS_BROWSER_API_KEY || "";
 const DISTRIBUTION_ORIGIN = process.env.DISTRIBUTION_ORIGIN || "Planta Bello Campo, Caracas, Venezuela";
 const DATABASE_URL = process.env.DATABASE_URL || "";
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "*";
@@ -204,58 +205,126 @@ async function saveClientOverride(key, data) {
     );
 }
 
-async function getDistance(origin, destination) {
-    if (!GOOGLE_MAPS_API_KEY) {
-        throw new Error("Falta GOOGLE_MAPS_API_KEY en variables de entorno.");
-    }
+function hasGoogleMapsConfig() {
+    return Boolean(GOOGLE_MAPS_API_KEY && GOOGLE_MAPS_BROWSER_API_KEY);
+}
+
+function makeGoogleMapsDirectionsUrl(origin, sequence) {
+    const stops = sequence.map((client) => client.address).filter(Boolean);
+    const destination = stops[stops.length - 1] || "";
+    const waypoints = stops.slice(0, -1);
     const params = new URLSearchParams({
-        origins: origin,
-        destinations: destination,
-        key: GOOGLE_MAPS_API_KEY,
-        language: "es"
+        api: "1",
+        origin,
+        destination,
+        travelmode: "driving"
     });
-    const url = `https://maps.googleapis.com/maps/api/distancematrix/json?${params.toString()}`;
-    const response = await fetch(url);
+    if (waypoints.length) {
+        params.set("waypoints", waypoints.join("|"));
+    }
+    return `https://www.google.com/maps/dir/?${params.toString()}`;
+}
+
+function formatMeters(meters) {
+    if (!Number.isFinite(meters)) return "";
+    if (meters < 1000) return `${Math.round(meters)} m`;
+    return `${(meters / 1000).toFixed(1)} km`;
+}
+
+function parseDurationSeconds(duration) {
+    const match = String(duration || "").match(/^(\d+(?:\.\d+)?)s$/);
+    return match ? Number(match[1]) : 0;
+}
+
+function formatDuration(duration) {
+    const seconds = parseDurationSeconds(duration);
+    if (!seconds) return "";
+    const minutes = Math.round(seconds / 60);
+    if (minutes < 60) return `${minutes} min`;
+    const hours = Math.floor(minutes / 60);
+    const rest = minutes % 60;
+    return rest ? `${hours} h ${rest} min` : `${hours} h`;
+}
+
+async function computeOptimizedRoute(originAddress, clients) {
+    if (!GOOGLE_MAPS_API_KEY) {
+        throw new Error("Falta GOOGLE_MAPS_SERVER_API_KEY o GOOGLE_MAPS_API_KEY en variables de entorno.");
+    }
+
+    const cleanClients = clients.filter((client) => client.address).slice(0, 25);
+    if (cleanClients.length < 2) {
+        throw new Error("La ruta necesita al menos 2 clientes con direccion para optimizar con Routes API.");
+    }
+
+    const destination = cleanClients[cleanClients.length - 1];
+    const intermediates = cleanClients.slice(0, -1);
+    const body = {
+        origin: { address: originAddress },
+        destination: { address: destination.address },
+        intermediates: intermediates.map((client) => ({ address: client.address })),
+        travelMode: "DRIVE",
+        routingPreference: "TRAFFIC_AWARE",
+        departureTime: new Date().toISOString(),
+        optimizeWaypointOrder: true,
+        languageCode: "es-419",
+        units: "METRIC"
+    };
+
+    const response = await fetch("https://routes.googleapis.com/directions/v2:computeRoutes", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+            "X-Goog-Api-Key": GOOGLE_MAPS_API_KEY,
+            "X-Goog-FieldMask": [
+                "routes.distanceMeters",
+                "routes.duration",
+                "routes.staticDuration",
+                "routes.polyline.encodedPolyline",
+                "routes.legs.distanceMeters",
+                "routes.legs.duration",
+                "routes.legs.staticDuration",
+                "routes.optimizedIntermediateWaypointIndex"
+            ].join(",")
+        },
+        body: JSON.stringify(body)
+    });
     if (!response.ok) throw new Error(`Google API HTTP ${response.status}`);
     const payload = await response.json();
-    const element = payload?.rows?.[0]?.elements?.[0];
-    if (!element || element.status !== "OK") throw new Error(`Google API sin resultado para: ${destination}`);
+    const route = payload?.routes?.[0];
+    if (!route) throw new Error("Google Routes API no devolvio rutas para esa consulta.");
+
+    const order = Array.isArray(route.optimizedIntermediateWaypointIndex)
+        ? route.optimizedIntermediateWaypointIndex
+        : intermediates.map((_, index) => index);
+    const sequence = order.map((index) => intermediates[index]).concat(destination);
+    const legs = Array.isArray(route.legs) ? route.legs : [];
+
     return {
-        meters: element.distance.value,
-        distanceText: element.distance.text,
-        durationText: element.duration.text
+        origin: originAddress,
+        totalClients: sequence.length,
+        totalDistanceKm: Number(((route.distanceMeters || 0) / 1000).toFixed(2)),
+        totalDurationText: formatDuration(route.duration),
+        totalDurationSeconds: parseDurationSeconds(route.duration),
+        trafficAware: true,
+        queriedAt: new Date().toISOString(),
+        polyline: route.polyline?.encodedPolyline || "",
+        googleMapsUrl: makeGoogleMapsDirectionsUrl(originAddress, sequence),
+        sequence: sequence.map((client, index) => {
+            const leg = legs[index] || {};
+            return {
+                ...client,
+                stopNumber: index + 1,
+                legDistanceMeters: Number(leg.distanceMeters || 0),
+                legDistanceText: formatMeters(Number(leg.distanceMeters || 0)),
+                legDurationText: formatDuration(leg.duration),
+                legDurationSeconds: parseDurationSeconds(leg.duration)
+            };
+        })
     };
 }
 
 async function optimizeRoute(clients, originAddress) {
-    const pending = clients.filter((c) => c.address).slice(0, 22).map((client) => ({ ...client }));
-    const optimized = [];
-    let currentOrigin = originAddress;
-    let totalMeters = 0;
-
-    while (pending.length > 0) {
-        const distances = await Promise.all(
-            pending.map(async (client) => ({ client, distance: await getDistance(currentOrigin, client.address) }))
-        );
-        distances.sort((a, b) => a.distance.meters - b.distance.meters);
-        const best = distances[0];
-        totalMeters += best.distance.meters;
-        optimized.push({
-            ...best.client,
-            legDistanceMeters: best.distance.meters,
-            legDistanceText: best.distance.distanceText,
-            legDurationText: best.distance.durationText
-        });
-        currentOrigin = best.client.address;
-        pending.splice(pending.findIndex((client) => client.key === best.client.key), 1);
-    }
-
-    return {
-        origin: originAddress,
-        totalClients: optimized.length,
-        totalDistanceKm: Number((totalMeters / 1000).toFixed(2)),
-        sequence: optimized
-    };
+    return computeOptimizedRoute(originAddress, clients);
 }
 
 function defaultDbChangeQuery() {
@@ -326,10 +395,34 @@ app.get("/api/health", async (_, res) => {
     try {
         await ensureDatabaseReady();
         await pool.query("SELECT 1");
-        res.json({ ok: true, service: "vrp-proyectoback", db: "connected", source: NEON_SOURCE_TABLE });
+        res.json({
+            ok: true,
+            service: "vrp-proyectoback",
+            db: "connected",
+            source: NEON_SOURCE_TABLE,
+            googleMapsReady: hasGoogleMapsConfig()
+        });
     } catch (error) {
         res.status(500).json({ ok: false, error: String(error.message || error) });
     }
+});
+
+app.get("/api/maps-config", (_, res) => {
+    res.json({
+        ok: true,
+        enabled: hasGoogleMapsConfig(),
+        browserApiKey: GOOGLE_MAPS_BROWSER_API_KEY,
+        origin: DISTRIBUTION_ORIGIN,
+        requiredApis: [
+            "Routes API",
+            "Maps JavaScript API",
+            "Geocoding API"
+        ],
+        missing: [
+            !GOOGLE_MAPS_API_KEY ? "GOOGLE_MAPS_SERVER_API_KEY" : "",
+            !GOOGLE_MAPS_BROWSER_API_KEY ? "GOOGLE_MAPS_BROWSER_API_KEY" : ""
+        ].filter(Boolean)
+    });
 });
 
 app.get("/api/routes", async (_, res) => {
