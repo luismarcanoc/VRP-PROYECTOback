@@ -6,7 +6,8 @@ const app = express();
 const PORT = Number(process.env.PORT || 10000);
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_SERVER_API_KEY || process.env.GOOGLE_MAPS_API_KEY || "";
 const GOOGLE_MAPS_BROWSER_API_KEY = process.env.GOOGLE_MAPS_BROWSER_API_KEY || "";
-const DISTRIBUTION_ORIGIN = process.env.DISTRIBUTION_ORIGIN || "Planta Bello Campo, Caracas, Venezuela";
+const DISTRIBUTION_ORIGIN_NAME = process.env.DISTRIBUTION_ORIGIN_NAME || "PDT Bello Campo";
+const DISTRIBUTION_ORIGIN = process.env.DISTRIBUTION_ORIGIN || "Edificio Onnis, Avenida Francisco de Miranda, & Avenida Coromoto, Caracas 1060, Miranda, Venezuela";
 const DATABASE_URL = process.env.DATABASE_URL || "";
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "*";
 const NEON_SOURCE_TABLE = process.env.NEON_SOURCE_TABLE || "DIRECCIONES Y RUTAS";
@@ -413,6 +414,7 @@ app.get("/api/maps-config", (_, res) => {
         enabled: hasGoogleMapsConfig(),
         browserApiKey: GOOGLE_MAPS_BROWSER_API_KEY,
         origin: DISTRIBUTION_ORIGIN,
+        originName: DISTRIBUTION_ORIGIN_NAME,
         requiredApis: [
             "Routes API",
             "Maps JavaScript API",
