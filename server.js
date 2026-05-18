@@ -28,8 +28,17 @@ loadLocalEnvFile();
 
 const app = express();
 const PORT = Number(process.env.PORT || 10000);
-const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_SERVER_API_KEY || process.env.GOOGLE_MAPS_API_KEY || "";
-const GOOGLE_MAPS_BROWSER_API_KEY = process.env.GOOGLE_MAPS_BROWSER_API_KEY || "";
+
+function cleanEnvValue(value) {
+    let cleaned = String(value || "").trim();
+    if ((cleaned.startsWith('"') && cleaned.endsWith('"')) || (cleaned.startsWith("'") && cleaned.endsWith("'"))) {
+        cleaned = cleaned.slice(1, -1).trim();
+    }
+    return cleaned;
+}
+
+const GOOGLE_MAPS_API_KEY = cleanEnvValue(process.env.GOOGLE_MAPS_SERVER_API_KEY || process.env.GOOGLE_MAPS_API_KEY || "");
+const GOOGLE_MAPS_BROWSER_API_KEY = cleanEnvValue(process.env.GOOGLE_MAPS_BROWSER_API_KEY || "");
 const DISTRIBUTION_ORIGIN_NAME = process.env.DISTRIBUTION_ORIGIN_NAME || "PDT Bello Campo";
 const DISTRIBUTION_ORIGIN = process.env.DISTRIBUTION_ORIGIN || "Edificio Onnis, Avenida Francisco de Miranda, & Avenida Coromoto, Caracas 1060, Miranda, Venezuela";
 const DATABASE_URL = process.env.DATABASE_URL || "";
@@ -447,7 +456,12 @@ async function googleRoutesRequest(url, fieldMask, body) {
         try {
             const payload = await response.json();
             detail = payload?.error?.message ? `: ${payload.error.message}` : "";
-        } catch (_) {}
+        } catch (_) {
+            try {
+                const text = await response.text();
+                detail = text ? `: ${text.slice(0, 240)}` : "";
+            } catch (_) {}
+        }
         throw new Error(`Google Routes API HTTP ${response.status}${detail}`);
     }
 
