@@ -419,6 +419,11 @@ function formatDuration(duration) {
     return rest ? `${hours} h ${rest} min` : `${hours} h`;
 }
 
+function getTrafficDepartureTimeIso() {
+    const fiveMinutesFromNow = Date.now() + (5 * 60 * 1000);
+    return new Date(fiveMinutesFromNow).toISOString();
+}
+
 async function computeOptimizedRoute(originAddress, clients) {
     if (!GOOGLE_MAPS_API_KEY) {
         throw new Error("Falta GOOGLE_MAPS_SERVER_API_KEY o GOOGLE_MAPS_API_KEY en variables de entorno.");
@@ -482,7 +487,7 @@ async function computeTrafficMatrix(originAddress, clients) {
         destinations: locations.map((location) => ({ waypoint: location })),
         travelMode: "DRIVE",
         routingPreference: "TRAFFIC_AWARE",
-        departureTime: new Date().toISOString(),
+        departureTime: getTrafficDepartureTimeIso(),
         languageCode: "es-419",
         units: "METRIC"
     };
@@ -600,7 +605,7 @@ async function computeRouteDetails(originAddress, sequence) {
         intermediates: intermediates.map((client) => ({ address: client.address })),
         travelMode: "DRIVE",
         routingPreference: "TRAFFIC_AWARE",
-        departureTime: new Date().toISOString(),
+        departureTime: getTrafficDepartureTimeIso(),
         optimizeWaypointOrder: false,
         languageCode: "es-419",
         units: "METRIC"
