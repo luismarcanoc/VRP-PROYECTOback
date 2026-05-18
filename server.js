@@ -454,13 +454,17 @@ async function googleRoutesRequest(url, fieldMask, body) {
     if (!response.ok) {
         let detail = "";
         try {
-            const payload = await response.json();
-            detail = payload?.error?.message ? `: ${payload.error.message}` : "";
+            const text = await response.text();
+            if (text) {
+                try {
+                    const payload = JSON.parse(text);
+                    detail = payload?.error?.message ? `: ${payload.error.message}` : `: ${text.slice(0, 240)}`;
+                } catch (_) {
+                    detail = `: ${text.slice(0, 240)}`;
+                }
+            }
         } catch (_) {
-            try {
-                const text = await response.text();
-                detail = text ? `: ${text.slice(0, 240)}` : "";
-            } catch (_) {}
+            detail = "";
         }
         throw new Error(`Google Routes API HTTP ${response.status}${detail}`);
     }
