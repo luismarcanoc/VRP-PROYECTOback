@@ -7,7 +7,7 @@
     "build": "npm install",
     "dev": "node server.js",
     "start": "node server.js",
-    "import:excel": "node scripts/import-excel-to-neon.js"
+    "import:excel": "node scripts/import-excel-to-db.js"
   },
   "repository": {
     "type": "git",

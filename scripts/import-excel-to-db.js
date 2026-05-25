@@ -9,9 +9,14 @@ if (!DATABASE_URL) {
     throw new Error("Falta DATABASE_URL.");
 }
 
+function getDatabaseSslConfig(connectionString) {
+    const mode = new URL(connectionString).searchParams.get("sslmode");
+    return String(mode || "").toLowerCase() === "disable" ? false : { rejectUnauthorized: false };
+}
+
 const pool = new Pool({
     connectionString: DATABASE_URL,
-    ssl: { rejectUnauthorized: false }
+    ssl: getDatabaseSslConfig(DATABASE_URL)
 });
 
 function normalizeHeader(value) {
@@ -76,7 +81,7 @@ async function run() {
         }
 
         await client.query("COMMIT");
-        console.log("Importacion a Neon completada.");
+        console.log("Importacion a PostgreSQL completada.");
     } catch (error) {
         await client.query("ROLLBACK");
         console.error("Error importando Excel:", error.message);

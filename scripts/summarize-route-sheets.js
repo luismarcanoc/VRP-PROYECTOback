@@ -6,10 +6,15 @@ if (!DATABASE_URL) {
     throw new Error("Falta DATABASE_URL.");
 }
 
+function getDatabaseSslConfig(connectionString) {
+    const mode = new URL(connectionString).searchParams.get("sslmode");
+    return String(mode || "").toLowerCase() === "disable" ? false : { rejectUnauthorized: false };
+}
+
 async function run() {
     const pool = new Pool({
         connectionString: DATABASE_URL,
-        ssl: { rejectUnauthorized: false }
+        ssl: getDatabaseSslConfig(DATABASE_URL)
     });
 
     try {

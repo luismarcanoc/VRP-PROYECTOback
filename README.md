@@ -1,6 +1,6 @@
 # VRP-PROYECTOback
 
-Backend para Render, conectado a Neon.
+Backend para Render, conectado a la base PostgreSQL central del proyecto.
 
 ## Comandos Render
 
@@ -10,15 +10,18 @@ Backend para Render, conectado a Neon.
 ## Variables de entorno (Render)
 
 - `PORT` (Render la define automaticamente)
-- `DATABASE_URL` (cadena de conexion de Neon)
-- `GOOGLE_MAPS_API_KEY`
+- `DATABASE_URL` (cadena de conexion PostgreSQL; soporta `sslmode=disable`)
+- `NODE_ENV` (`development` o `production`)
+- `GOOGLE_MAPS_SERVER_API_KEY` (Routes API)
+- `GOOGLE_MAPS_BROWSER_API_KEY` (Maps JavaScript API)
+- `GOOGLE_MAPS_API_KEY` (compatibilidad opcional para clave de servidor)
 - `DISTRIBUTION_ORIGIN` (opcional)
 - `FRONTEND_ORIGIN` (URL del frontend para CORS)
-- `NEON_SOURCE_TABLE` (por defecto `DIRECCIONES Y RUTAS`)
+- `SOURCE_TABLE` (por defecto `hojas_ruta_exportadas`)
 
 ### Auto deploy por cambios en DB (opcional)
 
-Si quieres que el backend dispare un deploy automaticamente cuando detecta cambios en Neon:
+Si quieres que el backend dispare un deploy automaticamente cuando detecta cambios en la tabla fuente:
 
 - `AUTO_DEPLOY_ON_DB_CHANGE=true`
 - `RENDER_DEPLOY_HOOK_URL=<tu deploy hook de render>`
@@ -28,19 +31,22 @@ Si quieres que el backend dispare un deploy automaticamente cuando detecta cambi
 
 Nota: para evitar loops de redeploy, usa cooldown alto.
 
-## Esquema en Neon
+## Esquema
 
-Ejecuta el SQL de:
+La fuente de rutas es `hojas_ruta_exportadas`; cada parada se lee desde `facturas[].direccion_texto`.
+El backend crea automaticamente `client_overrides` cuando necesita guardar correcciones.
+
+Para el esquema auxiliar histórico, consulta:
 
 - `db/schema.sql`
 
-## Cargar datos iniciales desde Excel a Neon
+## Cargar datos iniciales desde Excel
 
 1. Configura `DATABASE_URL` en tu terminal local.
 2. Ejecuta:
    - `npm run import:excel`
 
-Esto llena la tabla `clients` y desde ese momento el backend usa solo Neon.
+Este comando llena la tabla histórica `clients` en PostgreSQL; el grafo operativo usa `hojas_ruta_exportadas`.
 
 ## Endpoints
 

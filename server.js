@@ -41,9 +41,9 @@ const GOOGLE_MAPS_API_KEY = cleanEnvValue(process.env.GOOGLE_MAPS_SERVER_API_KEY
 const GOOGLE_MAPS_BROWSER_API_KEY = cleanEnvValue(process.env.GOOGLE_MAPS_BROWSER_API_KEY || "");
 const DISTRIBUTION_ORIGIN_NAME = process.env.DISTRIBUTION_ORIGIN_NAME || "PDT Bello Campo";
 const DISTRIBUTION_ORIGIN = process.env.DISTRIBUTION_ORIGIN || "Edificio Onnis, Avenida Francisco de Miranda, & Avenida Coromoto, Caracas 1060, Miranda, Venezuela";
-const DATABASE_URL = process.env.DATABASE_URL || "";
+const DATABASE_URL = cleanEnvValue(process.env.DATABASE_URL || "");
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "*";
-const NEON_SOURCE_TABLE = process.env.NEON_SOURCE_TABLE || "hojas_ruta_exportadas";
+const SOURCE_TABLE = cleanEnvValue(process.env.SOURCE_TABLE || "hojas_ruta_exportadas");
 const AUTO_DEPLOY_ON_DB_CHANGE = String(process.env.AUTO_DEPLOY_ON_DB_CHANGE || "false").toLowerCase() === "true";
 const RENDER_DEPLOY_HOOK_URL = process.env.RENDER_DEPLOY_HOOK_URL || "";
 const DB_WATCH_INTERVAL_MS = Number(process.env.DB_WATCH_INTERVAL_MS || 120000);
@@ -51,12 +51,26 @@ const AUTO_DEPLOY_COOLDOWN_MS = Number(process.env.AUTO_DEPLOY_COOLDOWN_MS || 60
 const DB_CHANGE_WATCH_QUERY = process.env.DB_CHANGE_WATCH_QUERY || "";
 
 if (!DATABASE_URL) {
-    throw new Error("Falta DATABASE_URL para conectar con Neon.");
+    throw new Error("Falta DATABASE_URL para conectar con PostgreSQL.");
+}
+
+function getDatabaseSslConfig(connectionString) {
+    let sslMode = "";
+    try {
+        sslMode = String(new URL(connectionString).searchParams.get("sslmode") || "").toLowerCase();
+    } catch (_) {}
+
+    if (sslMode === "disable") return false;
+    if (sslMode === "verify-full") return { rejectUnauthorized: true };
+    if (["require", "prefer", "verify-ca"].includes(sslMode)) return { rejectUnauthorized: false };
+    return String(process.env.NODE_ENV || "").toLowerCase() === "production"
+        ? { rejectUnauthorized: false }
+        : false;
 }
 
 const pool = new Pool({
     connectionString: DATABASE_URL,
-    ssl: { rejectUnauthorized: false }
+    ssl: getDatabaseSslConfig(DATABASE_URL)
 });
 
 app.use(cors({ origin: FRONTEND_ORIGIN === "*" ? true : FRONTEND_ORIGIN }));
@@ -162,7 +176,7 @@ async function ensureDatabaseReady() {
 }
 
 async function getSourceColumns() {
-    const { schema, table } = parseTableRef(NEON_SOURCE_TABLE);
+    const { schema, table } = parseTableRef(SOURCE_TABLE);
     const result = await pool.query(
         `SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2`,
         [schema, table]
@@ -171,7 +185,7 @@ async function getSourceColumns() {
 }
 
 async function fetchRouteSheets(routeFilter = "") {
-    const { schema, table } = parseTableRef(NEON_SOURCE_TABLE);
+    const { schema, table } = parseTableRef(SOURCE_TABLE);
     const tableRef = `${quoteIdent(schema)}.${quoteIdent(table)}`;
     const routeSheetId = parseRouteKey(routeFilter);
     const values = [];
@@ -248,7 +262,7 @@ function flattenRouteSheetClients(sheets) {
 
 async function fetchSourceClients(routeFilter) {
     const columns = await getSourceColumns();
-    if (!columns.length) throw new Error(`No existe la tabla ${NEON_SOURCE_TABLE} en Neon.`);
+    if (!columns.length) throw new Error(`No existe la tabla ${SOURCE_TABLE} en PostgreSQL.`);
 
     if (isRouteSheetSource(columns)) {
         const sheets = await fetchRouteSheets(routeFilter);
@@ -267,7 +281,7 @@ async function fetchSourceClients(routeFilter) {
     const routeCol = pickColumn(columns, ["RUTA", "RUTA ASIGNADA"]);
     const transportCol = pickColumn(columns, ["TRANSPORTE"]);
 
-    const { schema, table } = parseTableRef(NEON_SOURCE_TABLE);
+    const { schema, table } = parseTableRef(SOURCE_TABLE);
     const values = [];
     const where = routeFilter ? `WHERE ${sqlExpr(routeCol)} = $1` : "";
     if (routeFilter) values.push(routeFilter);
@@ -669,7 +683,7 @@ async function optimizeRoute(clients, originAddress) {
 }
 
 function defaultDbChangeQuery() {
-    const { schema, table } = parseTableRef(NEON_SOURCE_TABLE);
+    const { schema, table } = parseTableRef(SOURCE_TABLE);
     const tableRef = `${quoteIdent(schema)}.${quoteIdent(table)}`;
     return `
         SELECT md5(COUNT(*)::text || ':' || COALESCE(SUM(length(t::text))::text, '0')) AS signature
@@ -740,7 +754,7 @@ app.get("/api/health", async (_, res) => {
             ok: true,
             service: "vrp-proyectoback",
             db: "connected",
-            source: NEON_SOURCE_TABLE,
+            source: SOURCE_TABLE,
             googleMapsReady: hasGoogleMapsConfig()
         });
     } catch (error) {
