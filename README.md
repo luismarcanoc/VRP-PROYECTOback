@@ -58,5 +58,5 @@ Este comando llena la tabla histórica `clients` en PostgreSQL; el grafo operati
 - `GET /api/clients?route=...`
 - `GET /api/errors`
 - `PUT /api/clients/:key`
-- `PUT /api/deliveries/:key` con `{ "delivered": true }`
+- `PUT /api/deliveries/:key` con `{ "delivered": true, "deliveredBaskets": 12 }`
 - `POST /api/optimize-route`

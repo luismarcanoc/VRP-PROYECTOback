@@ -182,9 +182,14 @@ async function ensureDatabaseReady() {
         CREATE TABLE IF NOT EXISTS delivery_status (
             client_key TEXT PRIMARY KEY,
             delivered BOOLEAN NOT NULL DEFAULT FALSE,
+            delivered_baskets INT NOT NULL DEFAULT 0,
             delivered_at TIMESTAMPTZ,
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
+    `);
+    await pool.query(`
+        ALTER TABLE delivery_status
+        ADD COLUMN IF NOT EXISTS delivered_baskets INT NOT NULL DEFAULT 0
     `);
 }
 
@@ -335,7 +340,7 @@ async function getOverridesMap() {
 }
 
 async function getDeliveryStatusMap() {
-    const result = await pool.query("SELECT client_key, delivered, delivered_at FROM delivery_status");
+    const result = await pool.query("SELECT client_key, delivered, delivered_baskets, delivered_at FROM delivery_status");
     const map = new Map();
     result.rows.forEach((row) => map.set(row.client_key, row));
     return map;
@@ -350,6 +355,7 @@ async function getClients(route) {
         const deliveryStatus = deliveryStatuses.get(client.key);
         const delivery = {
             delivered: deliveryStatus ? Boolean(deliveryStatus.delivered) : Boolean(client.delivered),
+            deliveredBaskets: deliveryStatus ? Number(deliveryStatus.delivered_baskets || 0) : null,
             deliveredAt: deliveryStatus?.delivered_at || null
         };
         if (!override) return { ...client, ...delivery };
@@ -421,15 +427,17 @@ async function saveClientOverride(key, data) {
     );
 }
 
-async function saveDeliveryStatus(key, delivered) {
+async function saveDeliveryStatus(key, delivered, deliveredBaskets) {
+    const baskets = Math.max(0, Math.trunc(Number(deliveredBaskets || 0)));
     await pool.query(
-        `INSERT INTO delivery_status (client_key, delivered, delivered_at, updated_at)
-         VALUES ($1, $2::boolean, CASE WHEN $2::boolean THEN NOW() ELSE NULL END, NOW())
+        `INSERT INTO delivery_status (client_key, delivered, delivered_baskets, delivered_at, updated_at)
+         VALUES ($1, $2::boolean, $3::int, CASE WHEN $2::boolean THEN NOW() ELSE NULL END, NOW())
          ON CONFLICT (client_key) DO UPDATE
          SET delivered = EXCLUDED.delivered,
+             delivered_baskets = EXCLUDED.delivered_baskets,
              delivered_at = CASE WHEN EXCLUDED.delivered THEN COALESCE(delivery_status.delivered_at, NOW()) ELSE NULL END,
              updated_at = NOW()`,
-        [key, Boolean(delivered)]
+        [key, Boolean(delivered), baskets]
     );
 }
 
@@ -948,9 +956,13 @@ app.put("/api/deliveries/:key", async (req, res) => {
         await ensureDatabaseReady();
         const key = decodeURIComponent(req.params.key);
         const delivered = req.body?.delivered === true;
+        const deliveredBaskets = Number(req.body?.deliveredBaskets ?? 0);
         if (!key) return res.status(400).json({ ok: false, error: "Debes enviar una entrega valida." });
-        await saveDeliveryStatus(key, delivered);
-        res.json({ ok: true, key, delivered });
+        if (!Number.isInteger(deliveredBaskets) || deliveredBaskets < 0) {
+            return res.status(400).json({ ok: false, error: "La cantidad de cestas debe ser un numero entero no negativo." });
+        }
+        await saveDeliveryStatus(key, delivered, deliveredBaskets);
+        res.json({ ok: true, key, delivered, deliveredBaskets });
     } catch (error) {
         res.status(500).json({ ok: false, error: String(error.message || error) });
     }
