@@ -12,3 +12,10 @@ CREATE TABLE IF NOT EXISTS clients (
 );
 
 CREATE INDEX IF NOT EXISTS idx_clients_route_name ON clients(route_name);
+
+CREATE TABLE IF NOT EXISTS delivery_status (
+    client_key TEXT PRIMARY KEY,
+    delivered BOOLEAN NOT NULL DEFAULT FALSE,
+    delivered_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

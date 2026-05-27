@@ -178,6 +178,14 @@ async function ensureDatabaseReady() {
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
     `);
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS delivery_status (
+            client_key TEXT PRIMARY KEY,
+            delivered BOOLEAN NOT NULL DEFAULT FALSE,
+            delivered_at TIMESTAMPTZ,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    `);
 }
 
 async function getSourceColumns() {
@@ -258,6 +266,8 @@ function flattenRouteSheetClients(sheets) {
                 deliveryDate: formatDateValue(sheet.fecha_entrega),
                 totalDispatches: Number(sheet.total_despachos || facturas.length || 0),
                 totalBaskets: Number(sheet.total_cestas || 0),
+                baskets: Number(invoice.total_cestas || invoice.cestas || invoice.cantidad_cestas || 0),
+                delivered: invoice.entregado === true,
                 detail: Array.isArray(invoice.detalle) ? invoice.detalle : []
             });
         });
@@ -324,15 +334,29 @@ async function getOverridesMap() {
     return map;
 }
 
+async function getDeliveryStatusMap() {
+    const result = await pool.query("SELECT client_key, delivered, delivered_at FROM delivery_status");
+    const map = new Map();
+    result.rows.forEach((row) => map.set(row.client_key, row));
+    return map;
+}
+
 async function getClients(route) {
     const base = await fetchSourceClients(route);
     const overrides = await getOverridesMap();
+    const deliveryStatuses = await getDeliveryStatusMap();
     const merged = base.map((client) => {
         const override = overrides.get(client.key);
-        if (!override) return client;
+        const deliveryStatus = deliveryStatuses.get(client.key);
+        const delivery = {
+            delivered: deliveryStatus ? Boolean(deliveryStatus.delivered) : Boolean(client.delivered),
+            deliveredAt: deliveryStatus?.delivered_at || null
+        };
+        if (!override) return { ...client, ...delivery };
         const name = normalizeText(override.name || client.name);
         return {
             ...client,
+            ...delivery,
             name,
             nombre_o_razon_social: name,
             address: normalizeText(override.address || client.address),
@@ -394,6 +418,18 @@ async function saveClientOverride(key, data) {
              transport = EXCLUDED.transport,
              updated_at = NOW()`,
         [key, data.name, data.address, data.route, data.transport]
+    );
+}
+
+async function saveDeliveryStatus(key, delivered) {
+    await pool.query(
+        `INSERT INTO delivery_status (client_key, delivered, delivered_at, updated_at)
+         VALUES ($1, $2::boolean, CASE WHEN $2::boolean THEN NOW() ELSE NULL END, NOW())
+         ON CONFLICT (client_key) DO UPDATE
+         SET delivered = EXCLUDED.delivered,
+             delivered_at = CASE WHEN EXCLUDED.delivered THEN COALESCE(delivery_status.delivered_at, NOW()) ELSE NULL END,
+             updated_at = NOW()`,
+        [key, Boolean(delivered)]
     );
 }
 
@@ -902,6 +938,19 @@ app.put("/api/clients/:key", async (req, res) => {
             transport: normalizeText(transport)
         });
         res.json({ ok: true, key });
+    } catch (error) {
+        res.status(500).json({ ok: false, error: String(error.message || error) });
+    }
+});
+
+app.put("/api/deliveries/:key", async (req, res) => {
+    try {
+        await ensureDatabaseReady();
+        const key = decodeURIComponent(req.params.key);
+        const delivered = req.body?.delivered === true;
+        if (!key) return res.status(400).json({ ok: false, error: "Debes enviar una entrega valida." });
+        await saveDeliveryStatus(key, delivered);
+        res.json({ ok: true, key, delivered });
     } catch (error) {
         res.status(500).json({ ok: false, error: String(error.message || error) });
     }

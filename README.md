@@ -36,6 +36,7 @@ Nota: para evitar loops de redeploy, usa cooldown alto.
 
 La fuente de rutas es `hojas_ruta_exportadas`; cada parada se lee desde `facturas[].direccion_texto`.
 El backend crea automaticamente `client_overrides` cuando necesita guardar correcciones.
+El estado de entrega se persiste en `delivery_status`, vinculado a la parada, sin modificar el JSON original de la hoja exportada.
 El optimizador consulta duraciones con trafico en Routes API y, para rutas de hasta `EXACT_OPTIMIZATION_MAX_STOPS` entregas, evalua el orden de menor duracion de forma exacta.
 
 Para el esquema auxiliar histórico, consulta:
@@ -57,4 +58,5 @@ Este comando llena la tabla histórica `clients` en PostgreSQL; el grafo operati
 - `GET /api/clients?route=...`
 - `GET /api/errors`
 - `PUT /api/clients/:key`
+- `PUT /api/deliveries/:key` con `{ "delivered": true }`
 - `POST /api/optimize-route`
