@@ -18,6 +18,7 @@ Backend para Render, conectado a la base PostgreSQL central del proyecto.
 - `DISTRIBUTION_ORIGIN` (opcional)
 - `FRONTEND_ORIGIN` (URL del frontend para CORS)
 - `SOURCE_TABLE` (por defecto `hojas_ruta_exportadas`)
+- `EXACT_OPTIMIZATION_MAX_STOPS` (por defecto `14`; garantiza el menor tiempo de la matriz de Google hasta ese numero de paradas)
 
 ### Auto deploy por cambios en DB (opcional)
 
@@ -35,6 +36,7 @@ Nota: para evitar loops de redeploy, usa cooldown alto.
 
 La fuente de rutas es `hojas_ruta_exportadas`; cada parada se lee desde `facturas[].direccion_texto`.
 El backend crea automaticamente `client_overrides` cuando necesita guardar correcciones.
+El optimizador consulta duraciones con trafico en Routes API y, para rutas de hasta `EXACT_OPTIMIZATION_MAX_STOPS` entregas, evalua el orden de menor duracion de forma exacta.
 
 Para el esquema auxiliar histórico, consulta:
 

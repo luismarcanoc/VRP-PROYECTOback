@@ -49,6 +49,11 @@ const RENDER_DEPLOY_HOOK_URL = process.env.RENDER_DEPLOY_HOOK_URL || "";
 const DB_WATCH_INTERVAL_MS = Number(process.env.DB_WATCH_INTERVAL_MS || 120000);
 const AUTO_DEPLOY_COOLDOWN_MS = Number(process.env.AUTO_DEPLOY_COOLDOWN_MS || 600000);
 const DB_CHANGE_WATCH_QUERY = process.env.DB_CHANGE_WATCH_QUERY || "";
+const configuredExactOptimizationMaxStops = Number(process.env.EXACT_OPTIMIZATION_MAX_STOPS || 14);
+const EXACT_OPTIMIZATION_MAX_STOPS = Number.isFinite(configuredExactOptimizationMaxStops)
+    ? Math.max(1, Math.min(18, Math.trunc(configuredExactOptimizationMaxStops)))
+    : 14;
+const TRAFFIC_OPTIMAL_MATRIX_MAX_STOPS = 9;
 
 if (!DATABASE_URL) {
     throw new Error("Falta DATABASE_URL para conectar con PostgreSQL.");
@@ -438,6 +443,12 @@ function getTrafficDepartureTimeIso() {
     return new Date(fiveMinutesFromNow).toISOString();
 }
 
+function getMatrixTrafficRoutingPreference(clientCount) {
+    return clientCount <= TRAFFIC_OPTIMAL_MATRIX_MAX_STOPS
+        ? "TRAFFIC_AWARE_OPTIMAL"
+        : "TRAFFIC_AWARE";
+}
+
 async function computeOptimizedRoute(originAddress, clients) {
     if (!GOOGLE_MAPS_API_KEY) {
         throw new Error("Falta GOOGLE_MAPS_SERVER_API_KEY o GOOGLE_MAPS_API_KEY en variables de entorno.");
@@ -451,12 +462,18 @@ async function computeOptimizedRoute(originAddress, clients) {
     const matrix = cleanClients.length > 1
         ? await computeTrafficMatrix(originAddress, cleanClients)
         : null;
-    const orderedClients = matrix
+    const optimization = matrix
         ? optimizeClientOrderByDuration(cleanClients, matrix.durations)
-        : cleanClients;
-    const routeDetails = await computeRouteDetails(originAddress, orderedClients);
+        : { sequence: cleanClients, method: "routes_api_single_stop" };
+    const routeDetails = await computeRouteDetails(originAddress, optimization.sequence);
 
-    return buildOptimizedRouteResponse(originAddress, orderedClients, routeDetails, matrix);
+    return buildOptimizedRouteResponse(
+        originAddress,
+        optimization.sequence,
+        routeDetails,
+        matrix,
+        optimization.method
+    );
 }
 
 async function googleRoutesRequest(url, fieldMask, body) {
@@ -500,7 +517,7 @@ async function computeTrafficMatrix(originAddress, clients) {
         origins: locations.map((location) => ({ waypoint: location })),
         destinations: locations.map((location) => ({ waypoint: location })),
         travelMode: "DRIVE",
-        routingPreference: "TRAFFIC_AWARE",
+        routingPreference: getMatrixTrafficRoutingPreference(clients.length),
         departureTime: getTrafficDepartureTimeIso(),
         languageCode: "es-419",
         units: "METRIC"
@@ -536,7 +553,12 @@ async function computeTrafficMatrix(originAddress, clients) {
         distances[originIndex][destinationIndex] = Number(entry.distanceMeters || 0);
     });
 
-    return { durations, distances, queriedAt: new Date().toISOString() };
+    return {
+        durations,
+        distances,
+        routingPreference: body.routingPreference,
+        queriedAt: new Date().toISOString()
+    };
 }
 
 function pathDurationSeconds(order, durations) {
@@ -604,10 +626,68 @@ function twoOptOpenPath(order, durations) {
     return best;
 }
 
+function exactShortestOpenPathOrder(clients, durations) {
+    const clientCount = clients.length;
+    const stateCount = 1 << clientCount;
+    const costs = Array.from({ length: stateCount }, () => Array(clientCount).fill(Infinity));
+    const parents = Array.from({ length: stateCount }, () => Array(clientCount).fill(-1));
+
+    for (let clientIndex = 0; clientIndex < clientCount; clientIndex += 1) {
+        costs[1 << clientIndex][clientIndex] = pathDurationSeconds([clientIndex], durations);
+    }
+
+    for (let mask = 1; mask < stateCount; mask += 1) {
+        for (let last = 0; last < clientCount; last += 1) {
+            if (!(mask & (1 << last)) || !Number.isFinite(costs[mask][last])) continue;
+
+            for (let next = 0; next < clientCount; next += 1) {
+                if (mask & (1 << next)) continue;
+
+                const nextMask = mask | (1 << next);
+                const legSeconds = durations[last + 1]?.[next + 1];
+                const candidateCost = costs[mask][last] + (Number.isFinite(legSeconds) ? legSeconds : 86400);
+                if (candidateCost < costs[nextMask][next]) {
+                    costs[nextMask][next] = candidateCost;
+                    parents[nextMask][next] = last;
+                }
+            }
+        }
+    }
+
+    const fullMask = stateCount - 1;
+    let last = 0;
+    for (let clientIndex = 1; clientIndex < clientCount; clientIndex += 1) {
+        if (costs[fullMask][clientIndex] < costs[fullMask][last]) {
+            last = clientIndex;
+        }
+    }
+
+    const reversedOrder = [];
+    let mask = fullMask;
+    while (last >= 0) {
+        reversedOrder.push(last);
+        const previous = parents[mask][last];
+        mask ^= (1 << last);
+        last = previous;
+    }
+    return reversedOrder.reverse();
+}
+
 function optimizeClientOrderByDuration(clients, durations) {
+    if (clients.length <= EXACT_OPTIMIZATION_MAX_STOPS) {
+        const exact = exactShortestOpenPathOrder(clients, durations);
+        return {
+            sequence: exact.map((clientIndex) => clients[clientIndex]),
+            method: "routes_api_traffic_matrix_exact_shortest_duration"
+        };
+    }
+
     const nearest = nearestNeighborOrder(clients, durations);
     const improved = twoOptOpenPath(nearest, durations);
-    return improved.map((clientIndex) => clients[clientIndex]);
+    return {
+        sequence: improved.map((clientIndex) => clients[clientIndex]),
+        method: "routes_api_traffic_matrix_nearest_neighbor_2opt_fallback"
+    };
 }
 
 async function computeRouteDetails(originAddress, sequence) {
@@ -618,7 +698,7 @@ async function computeRouteDetails(originAddress, sequence) {
         destination: { address: destination.address },
         intermediates: intermediates.map((client) => ({ address: client.address })),
         travelMode: "DRIVE",
-        routingPreference: "TRAFFIC_AWARE",
+        routingPreference: "TRAFFIC_AWARE_OPTIMAL",
         departureTime: getTrafficDepartureTimeIso(),
         optimizeWaypointOrder: false,
         languageCode: "es-419",
@@ -643,7 +723,7 @@ async function computeRouteDetails(originAddress, sequence) {
     return route;
 }
 
-function buildOptimizedRouteResponse(originAddress, sequence, route, matrix) {
+function buildOptimizedRouteResponse(originAddress, sequence, route, matrix, optimizationMethod) {
     const legs = Array.isArray(route.legs) ? route.legs : [];
     return {
         origin: originAddress,
@@ -652,9 +732,9 @@ function buildOptimizedRouteResponse(originAddress, sequence, route, matrix) {
         totalDurationText: formatDuration(route.duration),
         totalDurationSeconds: parseDurationSeconds(route.duration),
         trafficAware: true,
-        optimizationMethod: matrix
-            ? "routes_api_traffic_matrix_nearest_neighbor_2opt"
-            : "routes_api_single_stop",
+        trafficRoutingPreference: "TRAFFIC_AWARE_OPTIMAL",
+        matrixRoutingPreference: matrix?.routingPreference || "",
+        optimizationMethod,
         matrixQueriedAt: matrix?.queriedAt || "",
         queriedAt: new Date().toISOString(),
         polyline: route.polyline?.encodedPolyline || "",
