@@ -956,8 +956,12 @@ app.put("/api/deliveries/:key", async (req, res) => {
         await ensureDatabaseReady();
         const key = decodeURIComponent(req.params.key);
         const delivered = req.body?.delivered === true;
-        const deliveredBaskets = Number(req.body?.deliveredBaskets ?? 0);
+        const hasDeliveredBaskets = Object.prototype.hasOwnProperty.call(req.body || {}, "deliveredBaskets");
+        const deliveredBaskets = Number(req.body?.deliveredBaskets);
         if (!key) return res.status(400).json({ ok: false, error: "Debes enviar una entrega valida." });
+        if (!hasDeliveredBaskets) {
+            return res.status(400).json({ ok: false, error: "Debes enviar la cantidad de cestas entregadas." });
+        }
         if (!Number.isInteger(deliveredBaskets) || deliveredBaskets < 0) {
             return res.status(400).json({ ok: false, error: "La cantidad de cestas debe ser un numero entero no negativo." });
         }
