@@ -12,7 +12,7 @@ Backend para Render, conectado a la base PostgreSQL central del proyecto.
 - `PORT` (Render la define automaticamente)
 - `DATABASE_URL` (cadena de conexion PostgreSQL; soporta `sslmode=disable`)
 - `NODE_ENV` (`development` o `production`)
-- `GOOGLE_MAPS_SERVER_API_KEY` (Routes API)
+- `GOOGLE_MAPS_SERVER_API_KEY` (Routes API y Geocoding API)
 - `GOOGLE_MAPS_BROWSER_API_KEY` (Maps JavaScript API)
 - `GOOGLE_MAPS_API_KEY` (compatibilidad opcional para clave de servidor)
 - `DISTRIBUTION_ORIGIN` (opcional)
@@ -37,6 +37,7 @@ Nota: para evitar loops de redeploy, usa cooldown alto.
 La fuente de rutas es `hojas_ruta_exportadas`; cada parada se lee desde `facturas[].direccion_texto`.
 El backend crea automaticamente `client_overrides` cuando necesita guardar correcciones.
 El estado de entrega se persiste en `delivery_status`, vinculado a la parada, sin modificar el JSON original de la hoja exportada.
+La validacion de direcciones se persiste en `address_validations`: marca direcciones no encontradas, coincidencias parciales y ubicaciones aproximadas para corregirlas desde el modulo de errores sin repetir consultas innecesarias.
 El optimizador consulta duraciones con trafico en Routes API y, para rutas de hasta `EXACT_OPTIMIZATION_MAX_STOPS` entregas, evalua el orden de menor duracion de forma exacta.
 La respuesta optimizada divide la exportacion a Google Maps en tramos de hasta 10 entregas. El origen se usa para optimizar, pero se omite del enlace exportado para que Maps navegue desde la ubicacion actual del conductor.
 

@@ -191,6 +191,22 @@ async function ensureDatabaseReady() {
         ALTER TABLE delivery_status
         ADD COLUMN IF NOT EXISTS delivered_baskets INT NOT NULL DEFAULT 0
     `);
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS address_validations (
+            client_key TEXT PRIMARY KEY,
+            address TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT '',
+            reason TEXT NOT NULL DEFAULT '',
+            formatted_address TEXT NOT NULL DEFAULT '',
+            location_type TEXT NOT NULL DEFAULT '',
+            partial_match BOOLEAN NOT NULL DEFAULT FALSE,
+            checked_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    `);
+    await pool.query(`
+        CREATE INDEX IF NOT EXISTS idx_address_validations_address
+        ON address_validations (address)
+    `);
 }
 
 async function getSourceColumns() {
@@ -346,10 +362,44 @@ async function getDeliveryStatusMap() {
     return map;
 }
 
+async function getAddressValidationsMap() {
+    const result = await pool.query(`
+        SELECT
+            client_key,
+            address,
+            status,
+            reason,
+            formatted_address,
+            location_type,
+            partial_match,
+            checked_at
+        FROM address_validations
+    `);
+    const map = new Map();
+    result.rows.forEach((row) => map.set(row.client_key, row));
+    return map;
+}
+
+function withAddressValidation(client, validation) {
+    if (!validation || normalizeText(validation.address) !== normalizeText(client.address)) return client;
+    const status = normalizeText(validation.status);
+    return {
+        ...client,
+        googleAddressStatus: status,
+        googleAddressIssue: Boolean(status && status !== "valid"),
+        googleAddressReason: normalizeText(validation.reason),
+        googleAddressFormatted: normalizeText(validation.formatted_address),
+        googleAddressLocationType: normalizeText(validation.location_type),
+        googleAddressPartialMatch: Boolean(validation.partial_match),
+        googleAddressCheckedAt: validation.checked_at || null
+    };
+}
+
 async function getClients(route) {
     const base = await fetchSourceClients(route);
     const overrides = await getOverridesMap();
     const deliveryStatuses = await getDeliveryStatusMap();
+    const addressValidations = await getAddressValidationsMap();
     const merged = base.map((client) => {
         const override = overrides.get(client.key);
         const deliveryStatus = deliveryStatuses.get(client.key);
@@ -358,9 +408,9 @@ async function getClients(route) {
             deliveredBaskets: deliveryStatus ? Number(deliveryStatus.delivered_baskets || 0) : null,
             deliveredAt: deliveryStatus?.delivered_at || null
         };
-        if (!override) return { ...client, ...delivery };
+        if (!override) return withAddressValidation({ ...client, ...delivery }, addressValidations.get(client.key));
         const name = normalizeText(override.name || client.name);
-        return {
+        return withAddressValidation({
             ...client,
             ...delivery,
             name,
@@ -369,7 +419,7 @@ async function getClients(route) {
             route: normalizeText(override.route_name || client.route),
             routeName: normalizeText(override.route_name || client.routeName),
             transport: normalizeText(override.transport || client.transport)
-        };
+        }, addressValidations.get(client.key));
     });
     if (!route) return merged;
     return merged.filter((client) => normalizeText(client.route) === normalizeText(route));
@@ -378,7 +428,7 @@ async function getClients(route) {
 function isClientWithErrors(client) {
     const route = normalizeHeader(client.route);
     const missingFields = !client.clientId || !client.name || !client.address || !client.route;
-    return missingFields || route.includes("revisar manualmente");
+    return missingFields || route.includes("revisar manualmente") || client.googleAddressIssue === true;
 }
 
 async function routeStats() {
@@ -425,6 +475,7 @@ async function saveClientOverride(key, data) {
              updated_at = NOW()`,
         [key, data.name, data.address, data.route, data.transport]
     );
+    await pool.query("DELETE FROM address_validations WHERE client_key = $1", [key]);
 }
 
 async function saveDeliveryStatus(key, delivered, deliveredBaskets) {
@@ -439,6 +490,154 @@ async function saveDeliveryStatus(key, delivered, deliveredBaskets) {
              updated_at = NOW()`,
         [key, Boolean(delivered), baskets]
     );
+}
+
+function classifyGeocodingResult(payload) {
+    if (payload?.status === "ZERO_RESULTS") {
+        return {
+            status: "not_found",
+            reason: "Google Maps no encontro esta direccion.",
+            formattedAddress: "",
+            locationType: "",
+            partialMatch: false
+        };
+    }
+    if (payload?.status !== "OK") {
+        throw new Error(`Google Geocoding API: ${payload?.status || "respuesta invalida"}. Activa Geocoding API para la clave de servidor.`);
+    }
+    if (!Array.isArray(payload.results) || !payload.results.length) {
+        return {
+            status: "not_found",
+            reason: "Google Maps no encontro esta direccion.",
+            formattedAddress: "",
+            locationType: "",
+            partialMatch: false
+        };
+    }
+
+    const result = payload.results[0] || {};
+    const locationType = normalizeText(result.geometry?.location_type);
+    if (result.partial_match === true) {
+        return {
+            status: "partial_match",
+            reason: "Google Maps solo encontro una coincidencia parcial. Revisa calle, edificio y ciudad.",
+            formattedAddress: normalizeText(result.formatted_address),
+            locationType,
+            partialMatch: true
+        };
+    }
+    if (["APPROXIMATE", "GEOMETRIC_CENTER"].includes(locationType)) {
+        return {
+            status: "low_precision",
+            reason: "Google Maps ubico una zona aproximada, no un pin suficientemente preciso.",
+            formattedAddress: normalizeText(result.formatted_address),
+            locationType,
+            partialMatch: false
+        };
+    }
+    return {
+        status: "valid",
+        reason: "",
+        formattedAddress: normalizeText(result.formatted_address),
+        locationType,
+        partialMatch: false
+    };
+}
+
+async function requestGoogleAddressValidation(address) {
+    if (!GOOGLE_MAPS_API_KEY) {
+        throw new Error("Falta GOOGLE_MAPS_SERVER_API_KEY o GOOGLE_MAPS_API_KEY para validar direcciones.");
+    }
+    const params = new URLSearchParams({
+        address: normalizeText(address),
+        key: GOOGLE_MAPS_API_KEY,
+        language: "es",
+        region: "ve"
+    });
+    const response = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?${params.toString()}`);
+    if (!response.ok) {
+        throw new Error(`Google Geocoding API HTTP ${response.status}. Activa Geocoding API para la clave de servidor.`);
+    }
+    return classifyGeocodingResult(await response.json());
+}
+
+async function saveAddressValidation(key, address, validation) {
+    await pool.query(
+        `INSERT INTO address_validations (
+            client_key,
+            address,
+            status,
+            reason,
+            formatted_address,
+            location_type,
+            partial_match,
+            checked_at
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7::boolean, NOW())
+         ON CONFLICT (client_key) DO UPDATE
+         SET address = EXCLUDED.address,
+             status = EXCLUDED.status,
+             reason = EXCLUDED.reason,
+             formatted_address = EXCLUDED.formatted_address,
+             location_type = EXCLUDED.location_type,
+             partial_match = EXCLUDED.partial_match,
+             checked_at = NOW()`,
+        [
+            key,
+            normalizeText(address),
+            validation.status,
+            validation.reason,
+            validation.formattedAddress,
+            validation.locationType,
+            Boolean(validation.partialMatch)
+        ]
+    );
+}
+
+async function validateClientAddresses(clients) {
+    const existing = await getAddressValidationsMap();
+    const byAddress = new Map();
+    existing.forEach((validation) => {
+        const address = normalizeText(validation.address);
+        if (address && !byAddress.has(address)) byAddress.set(address, validation);
+    });
+    const uniquePendingAddresses = new Map();
+
+    clients.forEach((client) => {
+        const address = normalizeText(client.address);
+        if (!address) return;
+        const cached = existing.get(client.key);
+        if (cached && normalizeText(cached.address) === address) return;
+        if (!byAddress.has(address)) uniquePendingAddresses.set(address, null);
+    });
+
+    for (const address of uniquePendingAddresses.keys()) {
+        const validation = await requestGoogleAddressValidation(address);
+        byAddress.set(address, {
+            address,
+            status: validation.status,
+            reason: validation.reason,
+            formatted_address: validation.formattedAddress,
+            location_type: validation.locationType,
+            partial_match: validation.partialMatch
+        });
+    }
+
+    for (const client of clients) {
+        const address = normalizeText(client.address);
+        if (!address) continue;
+        const cached = existing.get(client.key);
+        if (cached && normalizeText(cached.address) === address) continue;
+        const reused = byAddress.get(address);
+        if (!reused) continue;
+        await saveAddressValidation(client.key, address, {
+            status: reused.status,
+            reason: reused.reason,
+            formattedAddress: reused.formatted_address,
+            locationType: reused.location_type,
+            partialMatch: reused.partial_match
+        });
+    }
 }
 
 function hasGoogleMapsConfig() {
@@ -924,7 +1123,8 @@ app.get("/api/maps-config", (_, res) => {
         originName: DISTRIBUTION_ORIGIN_NAME,
         requiredApis: [
             "Routes API",
-            "Maps JavaScript API"
+            "Maps JavaScript API",
+            "Geocoding API"
         ],
         missing: [
             !GOOGLE_MAPS_API_KEY ? "GOOGLE_MAPS_SERVER_API_KEY" : "",
@@ -1007,9 +1207,25 @@ app.post("/api/optimize-route", async (req, res) => {
         const route = normalizeText(req.body?.route);
         const origin = normalizeText(req.body?.origin) || DISTRIBUTION_ORIGIN;
         if (!route) return res.status(400).json({ ok: false, error: "Debes enviar route." });
-        const clients = (await getClients(route)).filter((client) => client.address);
+        let clients = (await getClients(route)).filter((client) => client.address);
         if (!clients.length) {
             return res.status(404).json({ ok: false, error: `No hay clientes con direccion para la ruta ${route}.` });
+        }
+        await validateClientAddresses(clients);
+        clients = (await getClients(route)).filter((client) => client.address);
+        const notFoundClients = clients.filter((client) => client.googleAddressStatus === "not_found");
+        if (notFoundClients.length) {
+            return res.status(422).json({
+                ok: false,
+                error: `${notFoundClients.length} cliente(s) tienen direcciones que Google Maps no pudo encontrar. Revisalos en Ajustar datos > Arreglo de errores.`,
+                invalidClients: notFoundClients.map((client) => ({
+                    key: client.key,
+                    clientId: client.clientId,
+                    name: client.nombre_o_razon_social || client.name,
+                    address: client.address,
+                    reason: client.googleAddressReason
+                }))
+            });
         }
         const optimized = await optimizeRoute(clients, origin);
         res.json({ ok: true, route, optimized });
