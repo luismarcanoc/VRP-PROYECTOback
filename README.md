@@ -38,6 +38,7 @@ La fuente de rutas es `hojas_ruta_exportadas`; cada parada se lee desde `factura
 El backend crea automaticamente `client_overrides` cuando necesita guardar correcciones.
 El estado de entrega se persiste en `delivery_status`, vinculado a la parada, sin modificar el JSON original de la hoja exportada.
 El optimizador consulta duraciones con trafico en Routes API y, para rutas de hasta `EXACT_OPTIMIZATION_MAX_STOPS` entregas, evalua el orden de menor duracion de forma exacta.
+La respuesta optimizada divide la exportacion a Google Maps en tramos de hasta 10 entregas. El origen se usa para optimizar, pero se omite del enlace exportado para que Maps navegue desde la ubicacion actual del conductor.
 
 Para el esquema auxiliar histórico, consulta:
 

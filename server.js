@@ -445,13 +445,14 @@ function hasGoogleMapsConfig() {
     return Boolean(GOOGLE_MAPS_API_KEY && GOOGLE_MAPS_BROWSER_API_KEY);
 }
 
-function makeGoogleMapsDirectionsUrl(origin, sequence) {
+const GOOGLE_MAPS_DELIVERIES_PER_SEGMENT = 10;
+
+function makeGoogleMapsDirectionsUrl(sequence) {
     const stops = sequence.map((client) => client.address).filter(Boolean);
     const destination = stops[stops.length - 1] || "";
     const waypoints = stops.slice(0, -1);
     const params = new URLSearchParams({
         api: "1",
-        origin,
         destination,
         travelmode: "driving"
     });
@@ -459,6 +460,31 @@ function makeGoogleMapsDirectionsUrl(origin, sequence) {
         params.set("waypoints", waypoints.join("|"));
     }
     return `https://www.google.com/maps/dir/?${params.toString()}`;
+}
+
+function makeGoogleMapsNavigationUrl(address) {
+    const params = new URLSearchParams({
+        api: "1",
+        destination: normalizeText(address),
+        travelmode: "driving",
+        dir_action: "navigate"
+    });
+    return `https://www.google.com/maps/dir/?${params.toString()}`;
+}
+
+function makeGoogleMapsSegments(sequence) {
+    const segments = [];
+    for (let index = 0; index < sequence.length; index += GOOGLE_MAPS_DELIVERIES_PER_SEGMENT) {
+        const deliveries = sequence.slice(index, index + GOOGLE_MAPS_DELIVERIES_PER_SEGMENT);
+        segments.push({
+            index: segments.length + 1,
+            fromStopNumber: index + 1,
+            toStopNumber: index + deliveries.length,
+            totalClients: deliveries.length,
+            googleMapsUrl: makeGoogleMapsDirectionsUrl(deliveries)
+        });
+    }
+    return segments;
 }
 
 function formatMeters(meters) {
@@ -769,6 +795,7 @@ async function computeRouteDetails(originAddress, sequence) {
 
 function buildOptimizedRouteResponse(originAddress, sequence, route, matrix, optimizationMethod) {
     const legs = Array.isArray(route.legs) ? route.legs : [];
+    const googleMapsSegments = makeGoogleMapsSegments(sequence);
     return {
         origin: originAddress,
         totalClients: sequence.length,
@@ -782,7 +809,8 @@ function buildOptimizedRouteResponse(originAddress, sequence, route, matrix, opt
         matrixQueriedAt: matrix?.queriedAt || "",
         queriedAt: new Date().toISOString(),
         polyline: route.polyline?.encodedPolyline || "",
-        googleMapsUrl: makeGoogleMapsDirectionsUrl(originAddress, sequence),
+        googleMapsUrl: googleMapsSegments[0]?.googleMapsUrl || "",
+        googleMapsSegments,
         sequence: sequence.map((client, index) => {
             const leg = legs[index] || {};
             const latLng = leg.endLocation?.latLng;
@@ -793,6 +821,7 @@ function buildOptimizedRouteResponse(originAddress, sequence, route, matrix, opt
                 legDistanceText: formatMeters(Number(leg.distanceMeters || 0)),
                 legDurationText: formatDuration(leg.duration),
                 legDurationSeconds: parseDurationSeconds(leg.duration),
+                googleMapsNavigationUrl: makeGoogleMapsNavigationUrl(client.address),
                 location: latLng ? {
                     lat: Number(latLng.latitude),
                     lng: Number(latLng.longitude)
