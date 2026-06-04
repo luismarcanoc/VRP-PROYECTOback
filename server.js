@@ -94,6 +94,83 @@ function normalizeText(value) {
     return String(value || "").trim();
 }
 
+function normalizeUsername(value) {
+    return String(value || "")
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .toUpperCase()
+        .replace(/[^A-Z0-9]/g, "")
+        .slice(0, 20);
+}
+
+function normalizeRole(value) {
+    const role = normalizeHeader(value).replace(/\s+/g, "_");
+    if (role === "administrador" || role === "admin") return "administrador";
+    if (role === "conductor" || role === "chofer" || role === "driver") return "conductor";
+    if (role === "oplogistico") return "conductor";
+    return role;
+}
+
+function getRequestToken(req) {
+    const authHeader = String(req.headers.authorization || "").trim();
+    const match = /^Bearer\s+(.+)$/i.exec(authHeader);
+    if (match && match[1]) return String(match[1]).trim();
+    return normalizeText(req.query?.token || req.body?.token || "");
+}
+
+async function getRequestAuthContext(req) {
+    const token = getRequestToken(req);
+    if (!token) return null;
+    try {
+        const result = await pool.query(
+            `SELECT
+                u.username,
+                u.role,
+                COALESCE(u.full_name, '') AS full_name,
+                COALESCE(u.vehicle_plate, '') AS vehicle_plate
+             FROM auth_sessions s
+             JOIN auth_users u ON u.id_user = s.id_user
+             WHERE s.token = $1
+               AND s.revoked_at IS NULL
+               AND (s.expires_at IS NULL OR s.expires_at > NOW())
+               AND u.activo = TRUE
+             LIMIT 1`,
+            [token]
+        );
+        if (!result.rowCount) return null;
+        const row = result.rows[0];
+        return {
+            username: normalizeUsername(row.username),
+            role: normalizeRole(row.role),
+            fullName: normalizeText(row.full_name),
+            vehiclePlate: normalizeUsername(row.vehicle_plate)
+        };
+    } catch (error) {
+        console.error("No se pudo validar sesion VRP:", error.message || error);
+        return null;
+    }
+}
+
+async function requireRequestAuthContext(req, res) {
+    const auth = await getRequestAuthContext(req);
+    if (!auth) {
+        res.status(401).json({ ok: false, error: "Sesion requerida para consultar rutas." });
+        return null;
+    }
+    return auth;
+}
+
+function isConductorRestricted(auth) {
+    const username = normalizeUsername(auth?.username);
+    return normalizeRole(auth?.role) === "conductor" && username && username !== "OPLOGISTICO";
+}
+
+function appendConductorSheetFilter(whereParts, values, auth) {
+    if (!isConductorRestricted(auth)) return;
+    values.push(`%_${normalizeUsername(auth.username)}`);
+    whereParts.push(`REGEXP_REPLACE(UPPER(TRIM(COALESCE(nombre_archivo, ''))), '[^A-Z0-9_]', '', 'g') LIKE $${values.length}`);
+}
+
 function quoteIdent(identifier) {
     return `"${String(identifier).replace(/"/g, "\"\"")}"`;
 }
@@ -218,13 +295,18 @@ async function getSourceColumns() {
     return result.rows.map((row) => row.column_name);
 }
 
-async function fetchRouteSheets(routeFilter = "") {
+async function fetchRouteSheets(routeFilter = "", auth = null) {
     const { schema, table } = parseTableRef(SOURCE_TABLE);
     const tableRef = `${quoteIdent(schema)}.${quoteIdent(table)}`;
     const routeSheetId = parseRouteKey(routeFilter);
     const values = [];
-    const where = routeSheetId ? "WHERE id_hoja::text = $1" : "";
-    if (routeSheetId) values.push(routeSheetId);
+    const whereParts = [];
+    if (routeSheetId) {
+        values.push(routeSheetId);
+        whereParts.push(`id_hoja::text = $${values.length}`);
+    }
+    appendConductorSheetFilter(whereParts, values, auth);
+    const where = whereParts.length ? `WHERE ${whereParts.join(" AND ")}` : "";
 
     const result = await pool.query(
         `SELECT
@@ -296,12 +378,12 @@ function flattenRouteSheetClients(sheets) {
     return clients;
 }
 
-async function fetchSourceClients(routeFilter) {
+async function fetchSourceClients(routeFilter, auth = null) {
     const columns = await getSourceColumns();
     if (!columns.length) throw new Error(`No existe la tabla ${SOURCE_TABLE} en PostgreSQL.`);
 
     if (isRouteSheetSource(columns)) {
-        const sheets = await fetchRouteSheets(routeFilter);
+        const sheets = await fetchRouteSheets(routeFilter, auth);
         return flattenRouteSheetClients(sheets);
     }
 
@@ -395,8 +477,8 @@ function withAddressValidation(client, validation) {
     };
 }
 
-async function getClients(route) {
-    const base = await fetchSourceClients(route);
+async function getClients(route, auth = null) {
+    const base = await fetchSourceClients(route, auth);
     const overrides = await getOverridesMap();
     const deliveryStatuses = await getDeliveryStatusMap();
     const addressValidations = await getAddressValidationsMap();
@@ -431,10 +513,10 @@ function isClientWithErrors(client) {
     return missingFields || route.includes("revisar manualmente") || client.googleAddressIssue === true;
 }
 
-async function routeStats() {
+async function routeStats(auth = null) {
     const columns = await getSourceColumns();
     if (isRouteSheetSource(columns)) {
-        const sheets = await fetchRouteSheets("");
+        const sheets = await fetchRouteSheets("", auth);
         return sheets.map((sheet) => {
             const facturas = Array.isArray(sheet.facturas) ? sheet.facturas : [];
             return {
@@ -452,7 +534,7 @@ async function routeStats() {
         });
     }
 
-    const clients = await getClients("");
+    const clients = await getClients("", auth);
     const grouped = new Map();
     clients.forEach((client) => {
         const route = client.route || "SIN RUTA";
@@ -1133,10 +1215,29 @@ app.get("/api/maps-config", (_, res) => {
     });
 });
 
-app.get("/api/routes", async (_, res) => {
+app.get("/api/session", async (req, res) => {
+    try {
+        const auth = await getRequestAuthContext(req);
+        res.json({
+            ok: true,
+            session: auth ? {
+                username: auth.username,
+                role: auth.role,
+                fullName: auth.fullName,
+                vehiclePlate: auth.vehiclePlate
+            } : null
+        });
+    } catch (error) {
+        res.status(500).json({ ok: false, error: String(error.message || error) });
+    }
+});
+
+app.get("/api/routes", async (req, res) => {
     try {
         await ensureDatabaseReady();
-        res.json({ routes: await routeStats() });
+        const auth = await requireRequestAuthContext(req, res);
+        if (!auth) return;
+        res.json({ routes: await routeStats(auth) });
     } catch (error) {
         res.status(500).json({ ok: false, error: String(error.message || error) });
     }
@@ -1145,18 +1246,25 @@ app.get("/api/routes", async (_, res) => {
 app.get("/api/clients", async (req, res) => {
     try {
         await ensureDatabaseReady();
+        const auth = await requireRequestAuthContext(req, res);
+        if (!auth) return;
         const route = normalizeText(req.query.route);
-        const clients = await getClients(route);
+        const clients = await getClients(route, auth);
         res.json({ total: clients.length, clients });
     } catch (error) {
         res.status(500).json({ ok: false, error: String(error.message || error) });
     }
 });
 
-app.get("/api/errors", async (_, res) => {
+app.get("/api/errors", async (req, res) => {
     try {
         await ensureDatabaseReady();
-        const clients = (await getClients("")).filter(isClientWithErrors);
+        const auth = await requireRequestAuthContext(req, res);
+        if (!auth) return;
+        if (normalizeRole(auth.role) === "conductor") {
+            return res.status(403).json({ ok: false, error: "Los conductores solo pueden visualizar rutas." });
+        }
+        const clients = (await getClients("", auth)).filter(isClientWithErrors);
         res.json({ total: clients.length, clients });
     } catch (error) {
         res.status(500).json({ ok: false, error: String(error.message || error) });
@@ -1166,6 +1274,11 @@ app.get("/api/errors", async (_, res) => {
 app.put("/api/clients/:key", async (req, res) => {
     try {
         await ensureDatabaseReady();
+        const auth = await requireRequestAuthContext(req, res);
+        if (!auth) return;
+        if (normalizeRole(auth.role) === "conductor") {
+            return res.status(403).json({ ok: false, error: "Los conductores no pueden ajustar datos." });
+        }
         const key = decodeURIComponent(req.params.key);
         const { name, address, route, transport } = req.body || {};
         await saveClientOverride(key, {
@@ -1183,6 +1296,8 @@ app.put("/api/clients/:key", async (req, res) => {
 app.put("/api/deliveries/:key", async (req, res) => {
     try {
         await ensureDatabaseReady();
+        const auth = await requireRequestAuthContext(req, res);
+        if (!auth) return;
         const key = decodeURIComponent(req.params.key);
         const delivered = req.body?.delivered === true;
         const hasDeliveredBaskets = Object.prototype.hasOwnProperty.call(req.body || {}, "deliveredBaskets");
@@ -1204,15 +1319,17 @@ app.put("/api/deliveries/:key", async (req, res) => {
 app.post("/api/optimize-route", async (req, res) => {
     try {
         await ensureDatabaseReady();
+        const auth = await requireRequestAuthContext(req, res);
+        if (!auth) return;
         const route = normalizeText(req.body?.route);
         const origin = normalizeText(req.body?.origin) || DISTRIBUTION_ORIGIN;
         if (!route) return res.status(400).json({ ok: false, error: "Debes enviar route." });
-        let clients = (await getClients(route)).filter((client) => client.address);
+        let clients = (await getClients(route, auth)).filter((client) => client.address);
         if (!clients.length) {
             return res.status(404).json({ ok: false, error: `No hay clientes con direccion para la ruta ${route}.` });
         }
         await validateClientAddresses(clients);
-        clients = (await getClients(route)).filter((client) => client.address);
+        clients = (await getClients(route, auth)).filter((client) => client.address);
         const notFoundClients = clients.filter((client) => client.googleAddressStatus === "not_found");
         if (notFoundClients.length) {
             return res.status(422).json({
