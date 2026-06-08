@@ -269,6 +269,14 @@ async function ensureDatabaseReady() {
         ADD COLUMN IF NOT EXISTS delivered_baskets INT NOT NULL DEFAULT 0
     `);
     await pool.query(`
+        ALTER TABLE delivery_status
+        ADD COLUMN IF NOT EXISTS partial BOOLEAN NOT NULL DEFAULT FALSE
+    `);
+    await pool.query(`
+        ALTER TABLE delivery_status
+        ADD COLUMN IF NOT EXISTS partial_detail JSONB
+    `);
+    await pool.query(`
         CREATE TABLE IF NOT EXISTS address_validations (
             client_key TEXT PRIMARY KEY,
             address TEXT NOT NULL DEFAULT '',
@@ -438,7 +446,7 @@ async function getOverridesMap() {
 }
 
 async function getDeliveryStatusMap() {
-    const result = await pool.query("SELECT client_key, delivered, delivered_baskets, delivered_at FROM delivery_status");
+    const result = await pool.query("SELECT client_key, delivered, delivered_baskets, delivered_at, partial, partial_detail FROM delivery_status");
     const map = new Map();
     result.rows.forEach((row) => map.set(row.client_key, row));
     return map;
@@ -488,7 +496,9 @@ async function getClients(route, auth = null) {
         const delivery = {
             delivered: deliveryStatus ? Boolean(deliveryStatus.delivered) : Boolean(client.delivered),
             deliveredBaskets: deliveryStatus ? Number(deliveryStatus.delivered_baskets || 0) : null,
-            deliveredAt: deliveryStatus?.delivered_at || null
+            deliveredAt: deliveryStatus?.delivered_at || null,
+            partial: deliveryStatus ? Boolean(deliveryStatus.partial) : false,
+            partialDetail: deliveryStatus?.partial_detail || null
         };
         if (!override) return withAddressValidation({ ...client, ...delivery }, addressValidations.get(client.key));
         const name = normalizeText(override.name || client.name);
@@ -560,17 +570,21 @@ async function saveClientOverride(key, data) {
     await pool.query("DELETE FROM address_validations WHERE client_key = $1", [key]);
 }
 
-async function saveDeliveryStatus(key, delivered, deliveredBaskets) {
+async function saveDeliveryStatus(key, delivered, deliveredBaskets, partial, partialDetail) {
     const baskets = Math.max(0, Math.trunc(Number(deliveredBaskets || 0)));
+    const isPartial = Boolean(partial) && !Boolean(delivered);
+    const detailJson = isPartial && Array.isArray(partialDetail) ? JSON.stringify(partialDetail) : null;
     await pool.query(
-        `INSERT INTO delivery_status (client_key, delivered, delivered_baskets, delivered_at, updated_at)
-         VALUES ($1, $2::boolean, $3::int, CASE WHEN $2::boolean THEN NOW() ELSE NULL END, NOW())
+        `INSERT INTO delivery_status (client_key, delivered, delivered_baskets, delivered_at, partial, partial_detail, updated_at)
+         VALUES ($1, $2::boolean, $3::int, CASE WHEN $2::boolean THEN NOW() ELSE NULL END, $4::boolean, $5::jsonb, NOW())
          ON CONFLICT (client_key) DO UPDATE
          SET delivered = EXCLUDED.delivered,
              delivered_baskets = EXCLUDED.delivered_baskets,
              delivered_at = CASE WHEN EXCLUDED.delivered THEN COALESCE(delivery_status.delivered_at, NOW()) ELSE NULL END,
+             partial = EXCLUDED.partial,
+             partial_detail = EXCLUDED.partial_detail,
              updated_at = NOW()`,
-        [key, Boolean(delivered), baskets]
+        [key, Boolean(delivered), baskets, isPartial, detailJson]
     );
 }
 
@@ -1300,6 +1314,8 @@ app.put("/api/deliveries/:key", async (req, res) => {
         if (!auth) return;
         const key = decodeURIComponent(req.params.key);
         const delivered = req.body?.delivered === true;
+        const partial = req.body?.partial === true;
+        const partialDetail = Array.isArray(req.body?.partialDetail) ? req.body.partialDetail : null;
         const hasDeliveredBaskets = Object.prototype.hasOwnProperty.call(req.body || {}, "deliveredBaskets");
         const deliveredBaskets = Number(req.body?.deliveredBaskets);
         if (!key) return res.status(400).json({ ok: false, error: "Debes enviar una entrega valida." });
@@ -1309,8 +1325,8 @@ app.put("/api/deliveries/:key", async (req, res) => {
         if (!Number.isInteger(deliveredBaskets) || deliveredBaskets < 0) {
             return res.status(400).json({ ok: false, error: "La cantidad de cestas debe ser un numero entero no negativo." });
         }
-        await saveDeliveryStatus(key, delivered, deliveredBaskets);
-        res.json({ ok: true, key, delivered, deliveredBaskets });
+        await saveDeliveryStatus(key, delivered, deliveredBaskets, partial, partialDetail);
+        res.json({ ok: true, key, delivered, deliveredBaskets, partial });
     } catch (error) {
         res.status(500).json({ ok: false, error: String(error.message || error) });
     }
