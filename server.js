@@ -1350,7 +1350,7 @@ app.post("/api/optimize-route", async (req, res) => {
         if (notFoundClients.length) {
             return res.status(422).json({
                 ok: false,
-                error: `${notFoundClients.length} cliente(s) tienen direcciones que Google Maps no pudo encontrar. Revisalos en Ajustar datos > Arreglo de errores.`,
+                error: `${notFoundClients.length} cliente(s) tienen direcciones que Google Maps no pudo encontrar. Revisa esos datos antes de despachar.`,
                 invalidClients: notFoundClients.map((client) => ({
                     key: client.key,
                     clientId: client.clientId,
