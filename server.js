@@ -527,8 +527,22 @@ async function routeStats(auth = null) {
     const columns = await getSourceColumns();
     if (isRouteSheetSource(columns)) {
         const sheets = await fetchRouteSheets("", auth);
+        const deliveryStatuses = await getDeliveryStatusMap();
         return sheets.map((sheet) => {
             const facturas = Array.isArray(sheet.facturas) ? sheet.facturas : [];
+            const clients = flattenRouteSheetClients([sheet]);
+            const totals = clients.reduce((acc, client) => {
+                const deliveryStatus = deliveryStatuses.get(client.key);
+                const delivered = deliveryStatus ? Boolean(deliveryStatus.delivered) : Boolean(client.delivered);
+                const partial = deliveryStatus ? Boolean(deliveryStatus.partial) && !delivered : false;
+                acc.delivered += delivered ? 1 : 0;
+                acc.partial += partial ? 1 : 0;
+                return acc;
+            }, { delivered: 0, partial: 0 });
+            const totalClients = facturas.length;
+            const completedClients = totals.delivered + totals.partial;
+            const pendingClients = Math.max(0, totalClients - completedClients);
+            const progressPercent = totalClients ? Math.round((completedClients / totalClients) * 100) : 0;
             return {
                 route: makeRouteKey(sheet.id_hoja),
                 routeName: normalizeText(sheet.ruta_nombre) || "SIN RUTA",
@@ -537,7 +551,13 @@ async function routeStats(auth = null) {
                 deliveryDate: formatDateValue(sheet.fecha_entrega),
                 driver: normalizeText(sheet.conductor),
                 truck: normalizeText(sheet.numero_camion),
-                totalClients: facturas.length,
+                totalClients,
+                deliveredClients: totals.delivered,
+                partialClients: totals.partial,
+                completedClients,
+                pendingClients,
+                progressPercent,
+                completed: totalClients > 0 && pendingClients === 0,
                 totalDispatches: Number(sheet.total_despachos || facturas.length || 0),
                 totalBaskets: Number(sheet.total_cestas || 0)
             };
@@ -548,10 +568,31 @@ async function routeStats(auth = null) {
     const grouped = new Map();
     clients.forEach((client) => {
         const route = client.route || "SIN RUTA";
-        grouped.set(route, (grouped.get(route) || 0) + 1);
+        const current = grouped.get(route) || {
+            route,
+            totalClients: 0,
+            deliveredClients: 0,
+            partialClients: 0
+        };
+        current.totalClients += 1;
+        current.deliveredClients += client.delivered ? 1 : 0;
+        current.partialClients += client.partial && !client.delivered ? 1 : 0;
+        grouped.set(route, current);
     });
-    return Array.from(grouped.entries())
-        .map(([route, totalClients]) => ({ route, totalClients }))
+    return Array.from(grouped.values())
+        .map((item) => {
+            const completedClients = item.deliveredClients + item.partialClients;
+            const pendingClients = Math.max(0, item.totalClients - completedClients);
+            return {
+                ...item,
+                routeName: item.route,
+                displayName: item.route,
+                completedClients,
+                pendingClients,
+                progressPercent: item.totalClients ? Math.round((completedClients / item.totalClients) * 100) : 0,
+                completed: item.totalClients > 0 && pendingClients === 0
+            };
+        })
         .sort((a, b) => a.route.localeCompare(b.route));
 }
 
