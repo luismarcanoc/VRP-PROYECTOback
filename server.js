@@ -617,11 +617,15 @@ async function saveDeliveryStatus(key, delivered, deliveredBaskets, partial, par
     const detailJson = isPartial && Array.isArray(partialDetail) ? JSON.stringify(partialDetail) : null;
     await pool.query(
         `INSERT INTO delivery_status (client_key, delivered, delivered_baskets, delivered_at, partial, partial_detail, updated_at)
-         VALUES ($1, $2::boolean, $3::int, CASE WHEN $2::boolean THEN NOW() ELSE NULL END, $4::boolean, $5::jsonb, NOW())
+         VALUES ($1, $2::boolean, $3::int, CASE WHEN $2::boolean OR $4::boolean THEN NOW() ELSE NULL END, $4::boolean, $5::jsonb, NOW())
          ON CONFLICT (client_key) DO UPDATE
          SET delivered = EXCLUDED.delivered,
              delivered_baskets = EXCLUDED.delivered_baskets,
-             delivered_at = CASE WHEN EXCLUDED.delivered THEN COALESCE(delivery_status.delivered_at, NOW()) ELSE NULL END,
+             delivered_at = CASE
+                 WHEN EXCLUDED.delivered OR EXCLUDED.partial
+                 THEN COALESCE(delivery_status.delivered_at, EXCLUDED.delivered_at, NOW())
+                 ELSE NULL
+             END,
              partial = EXCLUDED.partial,
              partial_detail = EXCLUDED.partial_detail,
              updated_at = NOW()`,
